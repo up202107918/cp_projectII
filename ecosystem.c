@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
-#include <time.h>
 
+int in_bounds(int x, int y); // Check if coordinates are within bounds
 
 typedef enum {
     CELL_EMPTY = 0,
@@ -44,14 +44,17 @@ void read_input() {
         fprintf(stderr, "Erro ao ler parâmetros iniciais.\n");
         exit(EXIT_FAILURE);
     }
+
     world_curr = (Cell *) malloc(R * C * sizeof(Cell));
     world_next = (Cell *) malloc(R * C * sizeof(Cell));
     if (!world_curr || !world_next) {
         fprintf(stderr, "Erro ao alocar memória para o mundo.\n");
         exit(EXIT_FAILURE);
     }
+
     init_world(world_curr, R, C);
     init_world(world_next, R, C);
+
     for (int i = 0; i < N_objects; i++) {
         char obj[16];
         int x, y;
@@ -59,11 +62,14 @@ void read_input() {
             fprintf(stderr, "Erro ao ler objeto %d.\n", i);
             exit(EXIT_FAILURE);
         }
-        if (x < 0 || x >= R || y < 0 || y >= C) {
-            fprintf(stderr, "Coordenadas fora dos limites: %d %d\n", x, y);
+        // Validate coordinates
+        if (!(in_bounds(x, y))) {
+            fprintf(stderr, "Coordenadas inválidas para o objeto %d: (%d, %d)\n", i, x, y);
             exit(EXIT_FAILURE);
         }
+
         Cell *cell = &world_curr[IDX(x, y)];
+
         if (strcmp(obj, "ROCK") == 0) cell->type = CELL_ROCK;
         else if (strcmp(obj, "RABBIT") == 0) cell->type = CELL_RABBIT;
         else if (strcmp(obj, "FOX") == 0) cell->type = CELL_FOX;
@@ -71,24 +77,25 @@ void read_input() {
             fprintf(stderr, "Objeto desconhecido: %s\n", obj);
             exit(EXIT_FAILURE);
         }
+
         cell->proc_age = 0;
         cell->food_age = 0;
     }
 }
-
+// Structure to hold move information
 typedef struct {
     int proc_age;
     int food_age;
     int from_x, from_y;
     int valid;
-    int ate;
+    int ate; // For foxes: whether it ate a rabbit
 } MoveInfo;
 
 const int dx[4] = {-1, 0, 1, 0};
 const int dy[4] = {0, 1, 0, -1};
 
 int in_bounds(int x, int y) {
-    return x >= 0 && x < R && y >= 0 && y < C;
+    return (x >= 0 && x < R && y >= 0 && y < C);
 }
 
 void move_rabbits(int gen) {
@@ -96,21 +103,28 @@ void move_rabbits(int gen) {
     for (int i = 0; i < R * C; i++) {
         if (world_curr[i].type == CELL_ROCK) world_next[i] = world_curr[i];
     }
+
     MoveInfo *move_map = calloc(R * C, sizeof(MoveInfo));
     for (int i = 0; i < R * C; i++) move_map[i].valid = 0;
-    #pragma omp parallel for collapse(2)
+
+    // First pass: determine moves
+    #pragma omp parallel for collapse(2) 
     for (int x = 0; x < R; x++) {
         for (int y = 0; y < C; y++) {
             Cell *cell = &world_curr[IDX(x, y)];
             if (cell->type != CELL_RABBIT) continue;
+
             int empty_dirs[4], empty_count = 0;
+
             for (int d = 0; d < 4; d++) {
                 int nx = x + dx[d], ny = y + dy[d];
                 if (in_bounds(nx, ny) && world_curr[IDX(nx, ny)].type == CELL_EMPTY) {
                     empty_dirs[empty_count++] = d;
                 }
             }
+
             int tx = x, ty = y, moved = 0, tdir = -1;
+
             if (empty_count > 0) {
                 int sel = (gen + x + y) % empty_count;
                 tdir = empty_dirs[sel];
@@ -118,7 +132,10 @@ void move_rabbits(int gen) {
                 ty = y + dy[tdir];
                 moved = 1;
             }
+
             int idx = IDX(tx, ty);
+
+            // Update move map with critical section to avoid race conditions 
             #pragma omp critical
             {
             if (!move_map[idx].valid || cell->proc_age > move_map[idx].proc_age) {
@@ -130,14 +147,20 @@ void move_rabbits(int gen) {
             }
         }
     }
+    // Second pass: apply moves 
     for (int x = 0; x < R; x++) {
         for (int y = 0; y < C; y++) {
             int idx = IDX(x, y);
             if (!move_map[idx].valid) continue;
+
             int fx = move_map[idx].from_x, fy = move_map[idx].from_y;
+
             Cell *src = &world_curr[IDX(fx, fy)];
             Cell *dst = &world_next[idx];
+
             dst->type = CELL_RABBIT;
+
+            // Reproduction check 
             if ((src->proc_age + 1) >= GEN_PROC_RABBITS && (x != fx || y != fy)) {
                 Cell *old = &world_next[IDX(fx, fy)];
                 old->type = CELL_RABBIT;
@@ -151,9 +174,10 @@ void move_rabbits(int gen) {
             }
         }
     }
+
     free(move_map);
 }
-
+ // Move foxes function 
 void move_foxes(int gen) {
     for (int i = 0; i < R * C; i++) {
         if (world_curr[i].type == CELL_ROCK) world_next[i] = world_curr[i];
@@ -162,25 +186,38 @@ void move_foxes(int gen) {
         world_next[i].proc_age = 0;
         world_next[i].food_age = 0;
     }
+
     MoveInfo *move_map = calloc(R * C, sizeof(MoveInfo));
     for (int i = 0; i < R * C; i++) move_map[i].valid = 0;
+
+    // First pass: determine moves 
     #pragma omp parallel for collapse(2)
     for (int x = 0; x < R; x++) {
         for (int y = 0; y < C; y++) {
             Cell *cell = &world_curr[IDX(x, y)];
             if (cell->type != CELL_FOX) continue;
+
             if (cell->food_age >= GEN_FOOD_FOXES) continue;
+
             int rabbit_dirs[4], rabbit_count = 0;
             int empty_dirs[4], empty_count = 0;
+
+            // Check adjacent cells 
             for (int d = 0; d < 4; d++) {
                 int nx = x + dx[d], ny = y + dy[d];
+
                 if (!in_bounds(nx, ny)) continue;
+
                 if (world_curr[IDX(nx, ny)].type == CELL_RABBIT) rabbit_dirs[rabbit_count++] = d;
+
                 else if (world_curr[IDX(nx, ny)].type == CELL_EMPTY && world_next[IDX(nx, ny)].type != CELL_RABBIT) empty_dirs[empty_count++] = d;
             }
+
             int tx = x, ty = y, ate = 0, moved = 0, tdir = -1;
+
             int new_proc_age = cell->proc_age + 1;
             int new_food_age = cell->food_age + 1;
+
             if (rabbit_count > 0) {
                 int sel = (gen + x + y) % rabbit_count;
                 tdir = rabbit_dirs[sel];
@@ -189,6 +226,7 @@ void move_foxes(int gen) {
                 ate = 1;
                 new_food_age = 0;
                 moved = 1;
+
             } else if (empty_count > 0) {
                 int sel = (gen + x + y) % empty_count;
                 tdir = empty_dirs[sel];
@@ -196,7 +234,10 @@ void move_foxes(int gen) {
                 ty = y + dy[tdir];
                 moved = 1;
             }
+
             int idx = IDX(tx, ty);
+
+            // Update move map with critical section to avoid race conditions 
             #pragma omp critical
             {
             if (!move_map[idx].valid ||
@@ -212,14 +253,20 @@ void move_foxes(int gen) {
             }
         }
     }
+
+    // Second pass: apply moves
     for (int x = 0; x < R; x++) {
         for (int y = 0; y < C; y++) {
             int idx = IDX(x, y);
             if (!move_map[idx].valid) continue;
+
             int fx = move_map[idx].from_x, fy = move_map[idx].from_y;
+
             Cell *src = &world_curr[IDX(fx, fy)];
             Cell *dst = &world_next[idx];
+
             dst->type = CELL_FOX;
+
             if ((src->proc_age + 1) >= GEN_PROC_FOXES && (x != fx || y != fy)) {
                 Cell *old = &world_next[IDX(fx, fy)];
                 old->type = CELL_FOX;
@@ -262,16 +309,44 @@ void print_final_state(Cell *w) {
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+
+    omp_set_dynamic(0); // Disable dynamic teams 
+
+    // Set number of threads from command line argument
+    if (argc > 1) {
+        int n_threads = atoi(argv[1]); // Number of threads from command line
+        if (n_threads <= 0) {
+            fprintf(stderr, "Uso: %s <num_threads_positivo>\n", argv[0]);
+            exit(EXIT_FAILURE);
+        }
+        omp_set_num_threads(n_threads);
+    }
+    else {
+        omp_set_num_threads(1); // Default to 1 thread
+    }
+
+    // Read input and initialize world
     read_input();
+
+    double start_time = omp_get_wtime(); // Start timing 
+
     for (int gen = 0; gen < N_GEN; gen++) {
         move_rabbits(gen);
+
         Cell *tmp = world_curr; world_curr = world_next; world_next = tmp;
+
         move_foxes(gen);
         tmp = world_curr; world_curr = world_next; world_next = tmp;
     }
+
+    double end_time = omp_get_wtime(); // End timing
+    double elapsed_ms = (end_time - start_time) * 1000.0; // Convert to milliseconds
+    fprintf(stderr, "Tempo de execução: %.6f milissegundos\n", elapsed_ms);   
+
     print_final_state(world_curr);
     free(world_curr);
     free(world_next);
+
     return 0;
 }
