@@ -2,276 +2,334 @@
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
-#include <time.h>
 
+#define EMPTY 0
+#define ROCK 1
+#define RABBIT 2
+#define FOX 3
 
-typedef enum {
-    CELL_EMPTY = 0,
-    CELL_ROCK,
-    CELL_RABBIT,
-    CELL_FOX
-} CellType;
+#define LOCK_SIZE 65536
+#define LOCK_MASK 0xFFFF
 
 typedef struct {
-    CellType type;
+    int type;
     int proc_age;
     int food_age;
 } Cell;
 
-// Global variables
-int GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES, N_GEN, R, C, N_objects;
-Cell *world_curr = NULL, *world_next = NULL;
+int GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES, N_GENM, R, C, N;
+Cell *grid1;
+Cell *grid2;
+omp_lock_t locks[LOCK_SIZE];
 
-#define IDX(x, y) ((x) * C + (y))
-
-void init_world(Cell *w, int R, int C) {
+void init_grids() {
+    grid1 = (Cell *)calloc(R * C, sizeof(Cell));
+    grid2 = (Cell *)calloc(R * C, sizeof(Cell));
+    
     #pragma omp parallel for
-    for (int i = 0; i < R * C; i++) {
-        w[i].type = CELL_EMPTY;
-        w[i].proc_age = 0;
-        w[i].food_age = 0;
+    for (int i = 0; i < LOCK_SIZE; i++) {
+        omp_init_lock(&locks[i]);
     }
 }
 
-void read_input() {
-    if (scanf("%d %d %d %d %d %d %d",
-              &GEN_PROC_RABBITS,
-              &GEN_PROC_FOXES,
-              &GEN_FOOD_FOXES,
-              &N_GEN,
-              &R, &C,
-              &N_objects) != 7) {
-        fprintf(stderr, "Erro ao ler parâmetros iniciais.\n");
-        exit(EXIT_FAILURE);
+void destroy_grids() {
+    #pragma omp parallel for
+    for (int i = 0; i < LOCK_SIZE; i++) {
+        omp_destroy_lock(&locks[i]);
     }
-    world_curr = (Cell *) malloc(R * C * sizeof(Cell));
-    world_next = (Cell *) malloc(R * C * sizeof(Cell));
-    if (!world_curr || !world_next) {
-        fprintf(stderr, "Erro ao alocar memória para o mundo.\n");
-        exit(EXIT_FAILURE);
-    }
-    init_world(world_curr, R, C);
-    init_world(world_next, R, C);
-    for (int i = 0; i < N_objects; i++) {
-        char obj[16];
-        int x, y;
-        if (scanf("%15s %d %d", obj, &x, &y) != 3) {
-            fprintf(stderr, "Erro ao ler objeto %d.\n", i);
-            exit(EXIT_FAILURE);
+    free(grid1);
+    free(grid2);
+}
+
+int get_adjacent_index(int gen, int r, int c, int p_count) {
+    return (gen + r + c) % p_count;
+}
+
+void solve_rabbit_conflict(Cell *dest, int proc_age) {
+    // Assumes lock is held
+    if (dest->type == EMPTY) {
+        dest->type = RABBIT;
+        dest->proc_age = proc_age;
+    } else if (dest->type == RABBIT) {
+        if (proc_age > dest->proc_age) {
+            dest->proc_age = proc_age;
         }
-        if (x < 0 || x >= R || y < 0 || y >= C) {
-            fprintf(stderr, "Coordenadas fora dos limites: %d %d\n", x, y);
-            exit(EXIT_FAILURE);
-        }
-        Cell *cell = &world_curr[IDX(x, y)];
-        if (strcmp(obj, "ROCK") == 0) cell->type = CELL_ROCK;
-        else if (strcmp(obj, "RABBIT") == 0) cell->type = CELL_RABBIT;
-        else if (strcmp(obj, "FOX") == 0) cell->type = CELL_FOX;
-        else {
-            fprintf(stderr, "Objeto desconhecido: %s\n", obj);
-            exit(EXIT_FAILURE);
-        }
-        cell->proc_age = 0;
-        cell->food_age = 0;
     }
 }
 
-typedef struct {
-    int proc_age;
-    int food_age;
-    int from_x, from_y;
-    int valid;
-    int ate;
-} MoveInfo;
-
-const int dx[4] = {-1, 0, 1, 0};
-const int dy[4] = {0, 1, 0, -1};
-
-int in_bounds(int x, int y) {
-    return x >= 0 && x < R && y >= 0 && y < C;
+void solve_fox_conflict(Cell *dest, int proc_age, int food_age) {
+    // Assumes lock is held
+    if (dest->type == FOX) {
+        if (proc_age > dest->proc_age) {
+            dest->proc_age = proc_age;
+            dest->food_age = food_age;
+        } else if (proc_age == dest->proc_age) {
+            if (food_age < dest->food_age) {
+                dest->food_age = food_age;
+            }
+        }
+    } else {
+        // Overwrite Empty or Rabbit
+        dest->type = FOX;
+        dest->proc_age = proc_age;
+        dest->food_age = food_age;
+    }
 }
 
-void move_rabbits(int gen) {
-    init_world(world_next, R, C);
-    for (int i = 0; i < R * C; i++) {
-        if (world_curr[i].type == CELL_ROCK) world_next[i] = world_curr[i];
+int main(int argc, char *argv[]) {
+    omp_set_dynamic(0); // Disable dynamic teams 
+
+    // Set number of threads from command line argument
+    if (argc > 1) {
+        int n_threads = atoi(argv[1]); // Number of threads from command line
+        if (n_threads <= 0) {
+            fprintf(stderr, "Uso: %s <num_threads_positivo>\n", argv[0]);
+            exit(EXIT_FAILURE);
+        }
+        omp_set_num_threads(n_threads);
     }
-    MoveInfo *move_map = calloc(R * C, sizeof(MoveInfo));
-    for (int i = 0; i < R * C; i++) move_map[i].valid = 0;
-    #pragma omp parallel for collapse(2)
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            Cell *cell = &world_curr[IDX(x, y)];
-            if (cell->type != CELL_RABBIT) continue;
-            int empty_dirs[4], empty_count = 0;
-            for (int d = 0; d < 4; d++) {
-                int nx = x + dx[d], ny = y + dy[d];
-                if (in_bounds(nx, ny) && world_curr[IDX(nx, ny)].type == CELL_EMPTY) {
-                    empty_dirs[empty_count++] = d;
+    else {
+        omp_set_num_threads(1); // Default to 1 thread
+    }
+
+    // Read input
+    if (scanf("%d %d %d %d %d %d %d", &GEN_PROC_RABBITS, &GEN_PROC_FOXES, &GEN_FOOD_FOXES, &N_GENM, &R, &C, &N) != 7) {
+        return 1;
+    }
+
+    init_grids();
+
+    for (int k = 0; k < N; k++) {
+        char type[10];
+        int r, c;
+        scanf("%s %d %d", type, &r, &c);
+        int idx = r * C + c;
+        if (type[0] == 'R') {
+            if (type[1] == 'O') grid1[idx].type = ROCK;
+            else grid1[idx].type = RABBIT;
+        }
+        else if (type[0] == 'F') grid1[idx].type = FOX;
+    }
+
+    double start_time = omp_get_wtime(); // Start timing 
+
+    int dr[] = {-1, 0, 1, 0}; // N, E, S, W
+    int dc[] = {0, 1, 0, -1};
+
+    #pragma omp parallel
+    {
+        for (int gen = 0; gen < N_GENM; gen++) {
+            
+            // ================= PHASE 1: RABBITS =================
+            // Input: grid1, Output: grid2
+            
+            #pragma omp for
+            for (int k = 0; k < R * C; k++) {
+                // Initialize grid2 with static elements from grid1
+                if (grid1[k].type == ROCK) {
+                    grid2[k] = grid1[k];
+                } else if (grid1[k].type == FOX) {
+                    grid2[k] = grid1[k];
+                } else {
+                    grid2[k].type = EMPTY;
+                    grid2[k].proc_age = 0;
+                    grid2[k].food_age = 0;
                 }
             }
-            int tx = x, ty = y, moved = 0, tdir = -1;
-            if (empty_count > 0) {
-                int sel = (gen + x + y) % empty_count;
-                tdir = empty_dirs[sel];
-                tx = x + dx[tdir];
-                ty = y + dy[tdir];
-                moved = 1;
-            }
-            int idx = IDX(tx, ty);
-            #pragma omp critical
-            {
-            if (!move_map[idx].valid || cell->proc_age > move_map[idx].proc_age) {
-                move_map[idx].proc_age = cell->proc_age;
-                move_map[idx].from_x = x;
-                move_map[idx].from_y = y;
-                move_map[idx].valid = 1;
-            }
-            }
-        }
-    }
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            int idx = IDX(x, y);
-            if (!move_map[idx].valid) continue;
-            int fx = move_map[idx].from_x, fy = move_map[idx].from_y;
-            Cell *src = &world_curr[IDX(fx, fy)];
-            Cell *dst = &world_next[idx];
-            dst->type = CELL_RABBIT;
-            if ((src->proc_age + 1) >= GEN_PROC_RABBITS && (x != fx || y != fy)) {
-                Cell *old = &world_next[IDX(fx, fy)];
-                old->type = CELL_RABBIT;
-                old->proc_age = 0;
-                old->food_age = 0;
-                dst->proc_age = 0;
-                dst->food_age = 0;
-            } else {
-                dst->proc_age = src->proc_age + 1;
-                dst->food_age = 0;
-            }
-        }
-    }
-    free(move_map);
-}
 
-void move_foxes(int gen) {
-    for (int i = 0; i < R * C; i++) {
-        if (world_curr[i].type == CELL_ROCK) world_next[i] = world_curr[i];
-        if (world_next[i].type == CELL_RABBIT) continue;
-        world_next[i].type = CELL_EMPTY;
-        world_next[i].proc_age = 0;
-        world_next[i].food_age = 0;
-    }
-    MoveInfo *move_map = calloc(R * C, sizeof(MoveInfo));
-    for (int i = 0; i < R * C; i++) move_map[i].valid = 0;
-    #pragma omp parallel for collapse(2)
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            Cell *cell = &world_curr[IDX(x, y)];
-            if (cell->type != CELL_FOX) continue;
-            if (cell->food_age >= GEN_FOOD_FOXES) continue;
-            int rabbit_dirs[4], rabbit_count = 0;
-            int empty_dirs[4], empty_count = 0;
-            for (int d = 0; d < 4; d++) {
-                int nx = x + dx[d], ny = y + dy[d];
-                if (!in_bounds(nx, ny)) continue;
-                if (world_curr[IDX(nx, ny)].type == CELL_RABBIT) rabbit_dirs[rabbit_count++] = d;
-                else if (world_curr[IDX(nx, ny)].type == CELL_EMPTY && world_next[IDX(nx, ny)].type != CELL_RABBIT) empty_dirs[empty_count++] = d;
-            }
-            int tx = x, ty = y, ate = 0, moved = 0, tdir = -1;
-            int new_proc_age = cell->proc_age + 1;
-            int new_food_age = cell->food_age + 1;
-            if (rabbit_count > 0) {
-                int sel = (gen + x + y) % rabbit_count;
-                tdir = rabbit_dirs[sel];
-                tx = x + dx[tdir];
-                ty = y + dy[tdir];
-                ate = 1;
-                new_food_age = 0;
-                moved = 1;
-            } else if (empty_count > 0) {
-                int sel = (gen + x + y) % empty_count;
-                tdir = empty_dirs[sel];
-                tx = x + dx[tdir];
-                ty = y + dy[tdir];
-                moved = 1;
-            }
-            int idx = IDX(tx, ty);
-            #pragma omp critical
-            {
-            if (!move_map[idx].valid ||
-                cell->proc_age > move_map[idx].proc_age ||
-                (cell->proc_age == move_map[idx].proc_age && cell->food_age < move_map[idx].food_age)) {
-                move_map[idx].proc_age = new_proc_age;
-                move_map[idx].food_age = new_food_age;
-                move_map[idx].from_x = x;
-                move_map[idx].from_y = y;
-                move_map[idx].valid = 1;
-                move_map[idx].ate = ate;
-            }
-            }
-        }
-    }
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            int idx = IDX(x, y);
-            if (!move_map[idx].valid) continue;
-            int fx = move_map[idx].from_x, fy = move_map[idx].from_y;
-            Cell *src = &world_curr[IDX(fx, fy)];
-            Cell *dst = &world_next[idx];
-            dst->type = CELL_FOX;
-            if ((src->proc_age + 1) >= GEN_PROC_FOXES && (x != fx || y != fy)) {
-                Cell *old = &world_next[IDX(fx, fy)];
-                old->type = CELL_FOX;
-                old->proc_age = 0;
-                old->food_age = 0;
-                dst->proc_age = 0;
-                dst->food_age = move_map[idx].food_age;
-            } else {
-                dst->proc_age = move_map[idx].proc_age;
-                dst->food_age = move_map[idx].food_age;
-            }
-        }
-    }
-    free(move_map);
-}
+            #pragma omp for schedule(guided)
+            for (int i = 0; i < R; i++) {
+                for (int j = 0; j < C; j++) {
+                    int idx = i * C + j;
+                    if (grid1[idx].type == RABBIT) {
+                        int current_proc_age = grid1[idx].proc_age;
+                        
+                        int possible[4];
+                        int p_count = 0;
+                        for (int k = 0; k < 4; k++) {
+                            int ni = i + dr[k];
+                            int nj = j + dc[k];
+                            if (ni >= 0 && ni < R && nj >= 0 && nj < C) {
+                                int nidx = ni * C + nj;
+                                if (grid1[nidx].type == EMPTY) {
+                                    possible[p_count++] = k;
+                                }
+                            }
+                        }
 
-void print_final_state(Cell *w) {
-    // Count objects
-    int nobj = 0;
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            Cell *cell = &w[IDX(x, y)];
-            if (cell->type == CELL_ROCK || cell->type == CELL_RABBIT || cell->type == CELL_FOX)
-                nobj++;
-        }
-    }
-    // Print parameters (with N_GEN = 0 as in reference outputs)
-    printf("%d %d %d 0 %d %d %d\n", GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES, R, C, nobj);
-    // Print objects
-    for (int x = 0; x < R; x++) {
-        for (int y = 0; y < C; y++) {
-            Cell *cell = &w[IDX(x, y)];
-            if (cell->type == CELL_ROCK)
-                printf("ROCK %d %d\n", x, y);
-            else if (cell->type == CELL_RABBIT)
-                printf("RABBIT %d %d\n", x, y);
-            else if (cell->type == CELL_FOX)
-                printf("FOX %d %d\n", x, y);
-        }
-    }
-}
+                        int next_r = i, next_c = j;
+                        int moved = 0;
 
-int main() {
-    read_input();
-    for (int gen = 0; gen < N_GEN; gen++) {
-        move_rabbits(gen);
-        Cell *tmp = world_curr; world_curr = world_next; world_next = tmp;
-        move_foxes(gen);
-        tmp = world_curr; world_curr = world_next; world_next = tmp;
+                        if (p_count > 0) {
+                            int k = get_adjacent_index(gen, i, j, p_count);
+                            int dir = possible[k];
+                            next_r = i + dr[dir];
+                            next_c = j + dc[dir];
+                            moved = 1;
+                        }
+
+                        // Procreation Logic
+                        int new_proc_age = current_proc_age + 1;
+                        int baby = 0;
+                        if (moved && new_proc_age > GEN_PROC_RABBITS) {
+                            baby = 1;
+                            new_proc_age = 0;
+                        }
+
+                        // Apply Move
+                        int next_idx = next_r * C + next_c;
+                        if (moved) {
+                            // Move to next_r, next_c
+                            omp_set_lock(&locks[next_idx & LOCK_MASK]);
+                            solve_rabbit_conflict(&grid2[next_idx], new_proc_age);
+                            omp_unset_lock(&locks[next_idx & LOCK_MASK]);
+
+                            if (baby) {
+                                // Leave baby at old position
+                                omp_set_lock(&locks[idx & LOCK_MASK]);
+                                solve_rabbit_conflict(&grid2[idx], 0);
+                                omp_unset_lock(&locks[idx & LOCK_MASK]);
+                            }
+                        } else {
+                            // Stay at i, j
+                            omp_set_lock(&locks[idx & LOCK_MASK]);
+                            solve_rabbit_conflict(&grid2[idx], new_proc_age);
+                            omp_unset_lock(&locks[idx & LOCK_MASK]);
+                        }
+                    }
+                }
+            }
+
+            // ================= PHASE 2: FOXES =================
+            // Input: grid2, Output: grid1
+            
+            #pragma omp for
+            for (int k = 0; k < R * C; k++) {
+                // Initialize grid1 with static elements from grid2
+                if (grid2[k].type == ROCK) {
+                    grid1[k] = grid2[k];
+                } else if (grid2[k].type == RABBIT) {
+                    grid1[k] = grid2[k];
+                } else {
+                    grid1[k].type = EMPTY;
+                    grid1[k].proc_age = 0;
+                    grid1[k].food_age = 0;
+                }
+            }
+
+            #pragma omp for schedule(guided)
+            for (int i = 0; i < R; i++) {
+                for (int j = 0; j < C; j++) {
+                    int idx = i * C + j;
+                    if (grid2[idx].type == FOX) {
+                        int current_proc_age = grid2[idx].proc_age;
+                        int current_food_age = grid2[idx].food_age;
+
+                        int rabbit_moves[4];
+                        int r_count = 0;
+                        for (int k = 0; k < 4; k++) {
+                            int ni = i + dr[k];
+                            int nj = j + dc[k];
+                            if (ni >= 0 && ni < R && nj >= 0 && nj < C) {
+                                int nidx = ni * C + nj;
+                                if (grid2[nidx].type == RABBIT) {
+                                    rabbit_moves[r_count++] = k;
+                                }
+                            }
+                        }
+
+                        int next_r = i, next_c = j;
+                        int moved = 0;
+                        int ate = 0;
+
+                        if (r_count > 0) {
+                            int k = get_adjacent_index(gen, i, j, r_count);
+                            int dir = rabbit_moves[k];
+                            next_r = i + dr[dir];
+                            next_c = j + dc[dir];
+                            moved = 1;
+                            ate = 1;
+                        } else {
+                            // No rabbit. Check starvation.
+                            if (current_food_age + 1 >= GEN_FOOD_FOXES) {
+                                // Die. Don't put in grid1.
+                                continue;
+                            }
+
+                            // Try to move to empty
+                            int empty_moves[4];
+                            int e_count = 0;
+                            for (int k = 0; k < 4; k++) {
+                                int ni = i + dr[k];
+                                int nj = j + dc[k];
+                                if (ni >= 0 && ni < R && nj >= 0 && nj < C) {
+                                    int nidx = ni * C + nj;
+                                    if (grid2[nidx].type == EMPTY) {
+                                        empty_moves[e_count++] = k;
+                                    }
+                                }
+                            }
+
+                            if (e_count > 0) {
+                                int k = get_adjacent_index(gen, i, j, e_count);
+                                int dir = empty_moves[k];
+                                next_r = i + dr[dir];
+                                next_c = j + dc[dir];
+                                moved = 1;
+                            }
+                        }
+
+                        // Procreation Logic
+                        int new_proc_age = current_proc_age + 1;
+                        int new_food_age = ate ? 0 : current_food_age + 1;
+                        int baby = 0;
+
+                        if (moved && new_proc_age > GEN_PROC_FOXES) {
+                            baby = 1;
+                            new_proc_age = 0;
+                        }
+
+                        int next_idx = next_r * C + next_c;
+                        if (moved) {
+                            // Move to next_r, next_c
+                            omp_set_lock(&locks[next_idx & LOCK_MASK]);
+                            solve_fox_conflict(&grid1[next_idx], new_proc_age, new_food_age);
+                            omp_unset_lock(&locks[next_idx & LOCK_MASK]);
+
+                            if (baby) {
+                                // Leave baby at old position
+                                omp_set_lock(&locks[idx & LOCK_MASK]);
+                                solve_fox_conflict(&grid1[idx], 0, 0);
+                                omp_unset_lock(&locks[idx & LOCK_MASK]);
+                            }
+                        } else {
+                            // Stay
+                            omp_set_lock(&locks[idx & LOCK_MASK]);
+                            solve_fox_conflict(&grid1[idx], new_proc_age, new_food_age);
+                            omp_unset_lock(&locks[idx & LOCK_MASK]);
+                        }
+                    }
+                }
+            }
+        }
     }
-    print_final_state(world_curr);
-    free(world_curr);
-    free(world_next);
+    double end_time = omp_get_wtime(); // End timing
+
+    // Print Output
+    int count = 0;
+    for(int i=0; i<R*C; i++) if(grid1[i].type != EMPTY) count++;
+    
+    printf("%d %d %d %d %d %d %d\n", GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES, 0, R, C, count);
+
+    for (int i = 0; i < R; i++) {
+        for (int j = 0; j < C; j++) {
+            int idx = i * C + j;
+            if (grid1[idx].type == ROCK) printf("ROCK %d %d\n", i, j);
+            else if (grid1[idx].type == RABBIT) printf("RABBIT %d %d\n", i, j);
+            else if (grid1[idx].type == FOX) printf("FOX %d %d\n", i, j);
+        }
+    }
+    fprintf(stderr, "Execution Time: %f seconds\n", end_time - start_time);
+    destroy_grids();
     return 0;
 }
