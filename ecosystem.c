@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
+#include <time.h>
 
 #define EMPTY 0
 #define ROCK 1
@@ -204,9 +205,7 @@ int main(int argc, char *argv[]) {
             #pragma omp for
             for (int k = 0; k < R * C; k++) {
                 // Initialize grid1 with static elements from grid2
-                if (grid2[k].type == ROCK) {
-                    grid1[k] = grid2[k];
-                } else if (grid2[k].type == RABBIT) {
+                if (grid2[k].type == ROCK || grid2[k].type == RABBIT) {
                     grid1[k] = grid2[k];
                 } else {
                     grid1[k].type = EMPTY;
@@ -312,7 +311,7 @@ int main(int argc, char *argv[]) {
         }
     }
     double end_time = omp_get_wtime(); // End timing
-
+    double elapsed_ms = ((double)(end_time - start_time)) * 1000.0;
     // Print Output
     int count = 0;
     for(int i=0; i<R*C; i++) if(grid1[i].type != EMPTY) count++;
@@ -327,7 +326,7 @@ int main(int argc, char *argv[]) {
             else if (grid1[idx].type == FOX) printf("FOX %d %d\n", i, j);
         }
     }
-    fprintf(stderr, "Execution Time: %f milliseconds\n", (end_time - start_time) * 1000);
+    fprintf(stderr, "Execution Time: %f milliseconds\n", elapsed_ms);
     destroy_grids();
     return 0;
 }
