@@ -129,9 +129,9 @@ Parallel execution times for each worker configuration were also collected and u
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:seq-speedup} shows the execution times for the sequential and parallel versions. The sequential implementation achieved the lowest time ($T_{\text{seq}}=3679.024$ ms), while all parallel configurations resulted in longer runtimes, yielding $S_{\text{seq}}(p)<1$ for every $p$.
+Table \ref{tab:seq-speedup} shows the execution times for the sequential and parallel versions. The sequential implementation achieved the lowest time ($T_{\text{seq}}=3679.024$ ms), while all parallel configurations resulted in longer runtimes, yielding $S_{\text{seq}}(p)<1$ for every $p$.
 
-To complement this, Table~\ref{tab:speedup-matrix} presents the relative speedup matrix $S_i(p)$, comparing each worker configuration against all others. The matrix confirms that configurations with more workers do not scale and, in many cases, perform worse than those with fewer workers.
+To complement this, Table \ref{tab:speedup-matrix} presents the relative speedup matrix $S_i(p)$, comparing each worker configuration against all others. The matrix confirms that configurations with more workers do not scale and, in many cases, perform worse than those with fewer workers.
 
 The main causes of this poor scalability are:
 
