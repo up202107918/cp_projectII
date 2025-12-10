@@ -1,3 +1,0 @@
-Execution Time (sequential): 1236.220 milliseconds
-Execution Time (sequential): 1211.471 milliseconds
-Execution Time (sequential): 1231.333 milliseconds

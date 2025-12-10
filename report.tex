@@ -39,20 +39,31 @@
 \maketitle
 \section{Introduction}
 
-This report describes the implementation and evaluation of a parallel ecosystem simulator developed for Project II of the Parallel Computing course. The objective was to model interactions between rabbits, foxes and rocks on a 2D grid and to analyse the effect of introducing OpenMP-based parallelism. The document provides a concise overview of the algorithm, the adopted parallelisation strategy, performance results, and the main difficulties encountered during development.
+This report describes the implementation and evaluation of a parallel ecosystem simulator developed for Project Assignment II of the Parallel Computing course. The objective was to model interactions between rabbits, foxes and rocks on a 2D grid and to analyse the effect of introducing OpenMP-based parallelism. The document provides a concise overview of the algorithm, the adopted parallelisation strategy, performance results, and the main difficulties encountered during development.
 
 \section{Algorithm Overview}
 
-The simulator operates on an $R \times C$ grid where each cell may contain a rabbit, fox, rock, or be empty. The simulation evolves for $N_{\text{GEN}}$ generations, each consisting of two phases executed sequentially:
+The simulator operates on an $R \times C$ grid where each cell may contain a rabbit, fox, rock, or be empty. The simulation evolves for $\text{N\_GEN}$ generations, each consisting of two phases executed sequentially:
 
 {\raggedright
 \begin{itemize}
-    \item \textbf{Rabbit:} move to adjacent empty cells. Reproduction occurs after a fixed number of generations (\texttt{GEN\_PROC\_RABBITS}).
-    \item \textbf{Fox:} move preferentially towards adjacent rabbits; otherwise they move to empty cells. They reproduce after \texttt{GEN\_PROC\_FOXES} generations and die if they do not eat for \texttt{GEN\_FOOD\_FOXES} generations.
+    \item \textbf{Rabbit:} move to adjacent empty cells. Reproduction occurs after a fixed number of generations (\texttt{GEN\_PROC\_RABBITS}) and rabbits left one child in the cell they vacated. After reproduction and leaving cell, the age of counter resets.
+    \item \textbf{Fox:} move preferentially towards adjacent rabbits; otherwise they move to empty cells. They reproduce after \texttt{GEN\_PROC\_FOXES} generations and die if they do not eat for \texttt{GEN\_FOOD\_FOXES} generations. Foxes also leave one child in the cell they vacated upon reproduction, resetting their age counter.
 \end{itemize}
 }
 
 Two grids (\texttt{grid1} and \texttt{grid2}) are used in a double-buffering scheme. Each cell stores the entity type and age counters. Conflict resolution uses a simple priority rule: older animals, or (for foxes) animals with lower food age, overwrite younger ones.
+
+\subsection*{Conflicts resolution rules}
+
+When multiple animals attempt to move into the same cell, the following rules are applied:
+\begin{itemize}
+    \item \textbf{Rabbits:} the rabbit with the highest procreation age (\texttt{PROC\_AGE}) prevails. Younger rabbits lose the conflict and are not placed in the target cell.
+    
+    \item \textbf{Foxes:} if multiple foxes attempt to occupy the same cell, the fox with the highest procreation age prevails. In case of a tie, the fox with the lowest food age (\texttt{FOOD\_AGE}) is selected, reflecting preferential survival of less-starved individuals.
+\end{itemize}
+
+In each generation, every animal increases its procreation age (\texttt{PROC\_AGE}) by one unit. For foxes, the food age (\texttt{FOOD\_AGE}) also increases by one when they do not eat during that generation.
 
 \section{Parallel Implementation}
 
@@ -65,7 +76,7 @@ Parallelisation was introduced using OpenMP. A single parallel region encloses t
 
 \subsection{Synchronization}
 
-Multiple animals may attempt to move into the same cell. To ensure correctness, the parallel version uses a lock table of 65\,536 OpenMP locks, mapped to grid indices via a bit mask. Each write to the output grid acquires the corresponding lock, updates the cell using the conflict-resolution rules, and releases the lock. Although correct, this introduces substantial synchronization overhead.
+Multiple animals may attempt to move into the same cell. To ensure correctness, the parallel version uses a lock table of 65\,536 OpenMP locks, mapped to grid indices via a bit mask. Each potentially conflicting update to the output grid acquires the corresponding lock, applies the conflict-resolution rules, and then releases the lock. Although correct, this introduces substantial synchronization overhead.
 
 \subsection{Load Balancing}
 
@@ -77,7 +88,7 @@ The cost per cell depends on the presence of animals and their movement possibil
 
 This section presents the execution times (in milliseconds) and the speedups obtained for the sequential version and for the parallel implementation using 1, 2, 4, 8, and 16 workers.
 
-The average sequential execution time measured was $T_{\text{seq}} = 3679.024$ ms.  
+The average sequential execution time measured was $T_{\text{seq}} = 2767.548$ ms.  
 Parallel execution times for each worker configuration were also collected and used to compute two types of speedup:
 
 \begin{itemize}
@@ -92,7 +103,6 @@ Parallel execution times for each worker configuration were also collected and u
         S_i(p) = \frac{T_i}{T_p}
     \]
     which compares every worker configuration $p$ against a base configuration $i$.  
-    This provides a more complete understanding of how each configuration scales relative to all others.
 \end{itemize}
 
 \begin{table}[H]
@@ -103,11 +113,11 @@ Parallel execution times for each worker configuration were also collected and u
 \hline
 \textbf{Base Workers $i$} & \textbf{1} & \textbf{2} & \textbf{4} & \textbf{8} & \textbf{16} \\
 \hline
-1  & 1.000 & 1.435 & 1.647 & 1.144 & 0.752 \\
-2  & 0.696 & 1.000 & 1.147 & 0.797 & 0.524 \\
-4  & 0.606 & 0.871 & 1.000 & 0.694 & 0.456 \\
-8  & 0.874 & 1.254 & 1.440 & 1.000 & 0.657 \\
-16 & 1.328 & 1.907 & 2.189 & 1.520 & 1.000 \\
+1  & 1.000 & 1.410 & 2.227 & 3.192 & 3.558 \\
+2  & 0.708 & 1.000 & 1.578 & 2.262 & 2.522 \\
+4  & 0.448 & 0.633 & 1.000 & 1.433 & 1.597 \\
+8  & 0.313 & 0.441 & 0.697 & 1.000 & 1.114 \\
+16 & 0.280 & 0.396 & 0.625 & 0.896 & 1.000 \\
 \hline
 \end{tabular}
 \end{table}
@@ -120,29 +130,62 @@ Parallel execution times for each worker configuration were also collected and u
 \hline
 \textbf{Workers $p$} & \textbf{Execution Time $T_p$ (ms)} & \textbf{Speedup $S_{\text{seq}}(p)$} \\
 \hline
-1  & 6647.329 & 0.553 \\
-2  & 4630.680 & 0.794 \\
-4  & 4034.203 & 0.911 \\
-8  & 5809.968 & 0.633 \\
-16 & 8833.709 & 0.416 \\
+1  & 4781.816 & 0.578 \\
+2  & 3389.943 & 0.816 \\
+4  & 2146.978 & 1.289 \\
+8  & 1498.052 & 1.847 \\
+16 & 1343.618 & 2.059 \\
 \hline
 \end{tabular}
 \end{table}
 
-Table \ref{tab:seq-speedup} shows the execution times for the sequential and parallel versions. The sequential implementation achieved the lowest time ($T_{\text{seq}}=3679.024$ ms), while all parallel configurations resulted in longer runtimes, yielding $S_{\text{seq}}(p)<1$ for every $p$.
+Table~\ref{tab:speedup-matrix} shows that the parallel version exhibits internal scalability: configurations with more workers outperform those with fewer workers. However, when compared with the sequential runtime ($T_{\text{seq}}$), all parallel configurations remain slower, as shown in Table~\ref{tab:seq-speedup}. This indicates that the overhead introduced by parallelisation dominates the useful computation.
 
-To complement this, Table \ref{tab:speedup-matrix} presents the relative speedup matrix $S_i(p)$, comparing each worker configuration against all others. The matrix confirms that configurations with more workers do not scale and, in many cases, perform worse than those with fewer workers.
+Although the parallel implementation becomes faster as more threads are added, it never surpasses the sequential version. This occurs because parallel execution introduces substantial overhead --- including lock contention, memory-coherence traffic, and synchronization barriers --- which outweighs the useful work performed.
 
-The main causes of this poor scalability are:
+\subsection{Analysis of Results}
+The main causes of this lack of scalability are:
 
 \begin{itemize}
-    \item \textbf{High synchronization overhead:} the fine-grained lock table serializes many updates.
-    \item \textbf{Memory contention:} both grids are heavily accessed, creating high coherence and synchronization costs.
-    \item \textbf{Low computational granularity:} the useful work per cell is small compared to the cost of acquiring and releasing locks.
-    \item \textbf{Phase dependency:} fox processing depends on the rabbit phase, reducing available parallelism.
+    \item \textbf{High synchronization overhead:}  
+    The fine-grained lock table serializes a large portion of the updates, causing threads to wait frequently.
+    
+    \item \textbf{Memory contention:}  
+    Both grids are accessed intensively by all workers, leading to cache invalidations and increased memory-coherence traffic.
+    
+    \item \textbf{Low computational granularity:}  
+    Each update performs only a small amount of useful work, while lock acquisition and release dominate the total cost.
+    
+    \item \textbf{Phase dependency:}  
+    The strict ordering between the rabbit and fox phases prevents additional parallelism and limits speedup.
 \end{itemize}
 
-Overall, the overhead introduced by OpenMP exceeds the useful work required by the simulation, explaining why the parallel version becomes slower as the number of workers increases.
+Even though the relative speedup matrix shows that using more workers can improve performance when compared with fewer workers, the \textbf{absolute performance remains worse than the sequential version for all thread counts}.
+
+\subsection{Comparison with Previous Measurements}
+
+\begin{table}[H]
+\centering
+\caption{Comparison between an locally machine and hyrax64 sequential speedup values.}
+\label{tab:old-vs-new-speedup}
+\begin{tabular}{c|cc}
+\hline
+\textbf{Workers $p$} & \textbf{locally $S_{\text{seq}}(p)$} & \textbf{hyrax64 $S_{\text{seq}}(p)$} \\
+\hline
+1  & 0.553 & 0.578 \\
+2  & 0.794 & 0.816 \\
+4  & 0.911 & 1.289 \\
+8  & 0.633 & 1.847 \\
+16 & 0.416 & 2.059 \\
+\hline
+\end{tabular}
+\end{table}
+
+To contextualize the updated results obtained on \texttt{hyrax64}, Table~\ref{tab:old-vs-new-speedup} compares the new speedup values with the previous measurements taken locally. The earlier results showed performance degradation as the number of workers increased, while the updated results exhibit clear internal scalability and noticeably higher speedups.
+
+Overall, the comparison indicates that the previous execution environment suffered from severe contention, higher synchronization costs, and poor scaling, while the \texttt{hyrax64} environment provides substantially better thread utilization.
+
+The differences between the two sets of results arise from variations in system architecture and runtime conditions. The earlier machine exhibited stronger effects from lock contention, memory bandwidth limitations, and cache interference, which severely hindered scalability. In contrast, \texttt{hyrax64} offers more efficient parallel execution, improved cache performance, and lower contention, allowing the algorithm to achieve significantly better speedups and more consistent internal scalability.
 
 \section{Difficulties and Comments}
 
@@ -154,14 +197,11 @@ The project illustrated that parallelisation is not always beneficial, especiall
 
 \section{Conclusion}
 
-The project provided practical insight into parallel programming and highlighted the gap between theoretical speedup and real performance. Although a correct OpenMP parallelisation was implemented, the simulation did not benefit from multiple workers due to synchronization costs, memory contention, and phase dependencies.
+Although multiple thread configurations were tested (1, 2, 4, 8, and 16 workers), none of them outperformed the sequential execution. The highest speedup obtained relative to the sequential baseline was $S_{\text{seq}}(16)=2.059$, which remains below~1 and confirms that the overhead introduced by parallelisation outweighs the useful computational work.
 
-Despite the lack of performance gains, the work was valuable for understanding how algorithm structure, data dependencies, and access patterns influence scalability. These lessons are essential for designing efficient parallel applications.
+The speedup matrix shows that increasing the number of workers provides modest internal improvements (e.g., $S_{8}(16)=1.114$). However, these gains are not sufficient to overcome synchronization costs, memory contention, and the fine-grained nature of the updates. This demonstrates that, for algorithms dominated by shared-memory conflicts and frequent synchronization, OpenMP parallelisation may hinder performance rather than enhance it.
 
 \begin{thebibliography}{9}
-
-\bibitem{pacheco}
-P. Pacheco, \textit{Parallel Programming with MPI}. Morgan Kaufmann, 1997.
 
 \bibitem{quinn}
 M. J. Quinn, \textit{Parallel Programming in C with MPI and OpenMP}. McGraw-Hill, 2003.
