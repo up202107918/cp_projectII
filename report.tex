@@ -39,13 +39,7 @@
 \maketitle
 \section{Introduction}
 
-This report describes the implementation and evaluation of a parallel ecosystem simulator developed for this project. 
-The objective was to model interactions between rabbits, 
-foxes and rocks on a 2D grid and to analyse the effect 
-of introducing OpenMP-based parallelism. The document 
-provides a concise overview of the algorithm in question, the adopted 
-parallelisation strategy, performance results, and the main 
-difficulties encountered during development.
+This report describes the implementation and evaluation of a parallel ecosystem simulator developed for Project Assignment II of the Parallel Computing course. The objective was to model interactions between rabbits, foxes and rocks on a 2D grid and to analyse the effect of introducing OpenMP-based parallelism. The document provides a concise overview of the algorithm, the adopted parallelisation strategy, performance results, and the main difficulties encountered during development.
 
 \section{Algorithm Overview}
 
@@ -208,15 +202,7 @@ To contextualize the updated results obtained on \texttt{hyrax64}, Table~\ref{ta
 
 Overall, the comparison indicates that the previous execution environment suffered from severe contention, higher synchronization costs, and poor scaling, while the \texttt{hyrax64} environment provides substantially better thread utilization.
 
-The differences between the two sets of results arise 
-from variations in system architecture and runtime 
-conditions. The earlier machine exhibited stronger 
-effects from lock contention, memory bandwidth limitations, 
-and cache interference, which severely hindered scalability. 
-In contrast, \texttt{hyrax64} offers more efficient parallel 
-execution, improved cache performance, and lower contention, 
-allowing the algorithm to achieve significantly better 
-speedups and more consistent internal scalability.
+The differences between the two sets of results arise from variations in system architecture and runtime conditions. The earlier machine exhibited stronger effects from lock contention, memory bandwidth limitations, and cache interference, which severely hindered scalability. In contrast, \texttt{hyrax64} offers more efficient parallel execution, improved cache performance, and lower contention, allowing the algorithm to achieve significantly better speedups and more consistent internal scalability.
 
 \section{Difficulties and Comments}
 
